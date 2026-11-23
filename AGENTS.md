@@ -28,9 +28,8 @@
 
 ## 4. 本地开发环境约定
 
-- **默认 Python 环境**：统一使用 conda 虚拟环境 **`sl-dev-313`**（`/Users/allen/anaconda3/envs/sl-dev-313/bin/python`，Python 3.13.5）。
-- **模块路径**：运行项目脚本、因子评测、回测或 `pytest` 时，指定 `PYTHONPATH=agent`（例如 `PYTHONPATH=agent /Users/allen/anaconda3/envs/sl-dev-313/bin/pytest agent/tests/...`）。
-- **依赖保护**：`sl-dev-313` 为共用开发环境（已安装 `pandas`、`numpy`、`polars`、`bottleneck`、`fastapi`、`uvicorn`、`pytest` 等），**不要**直接执行全量 `pip install -e .` 强行覆盖升级该环境中已有的 `fastmcp` / `mcp` 等包；若需补充缺失包，应按需单独安装并确认不破坏现有版本。
+- **默认 Python 环境**：统一使用 conda 虚拟环境 **`sl-dev-313`**（`/Users/allen/anaconda3/envs/sl-dev-313/bin/python`，Python 3.13.5），已完成本仓库 editable 安装（`vibe-trading-ai` + `duckdb` + `polars` + `fastapi` + `fastmcp` 等全量依赖）。
+- **模块路径与命令**：激活 `sl-dev-313` 后可直接运行 `vibe-trading`、`vibe-trading-mcp`、`python agent/api_server.py` 与 `pytest agent/tests/...`（非激活状态下调用脚本或 `pytest` 建议显式附带 `PYTHONPATH=agent`）。
 
 ## 5. 常用工作流参考
 
