@@ -26,7 +26,13 @@
 3. **严禁修改 `upstream` 的推送限制**：不要移除或覆盖 `upstream` 的 `DISABLED` push URL，也不要尝试向 `HKUDS/Vibe-Trading` 推送任何分支或提交。
 4. **禁止未经确认向原仓库发起 PR**：所有提交仅保留在个人 Fork（`origin`）中。
 
-## 4. 常用工作流参考
+## 4. 本地开发环境约定
+
+- **默认 Python 环境**：统一使用 conda 虚拟环境 **`sl-dev-313`**（`/Users/allen/anaconda3/envs/sl-dev-313/bin/python`，Python 3.13.5）。
+- **模块路径**：运行项目脚本、因子评测、回测或 `pytest` 时，指定 `PYTHONPATH=agent`（例如 `PYTHONPATH=agent /Users/allen/anaconda3/envs/sl-dev-313/bin/pytest agent/tests/...`）。
+- **依赖保护**：`sl-dev-313` 为共用开发环境（已安装 `pandas`、`numpy`、`polars`、`bottleneck`、`fastapi`、`uvicorn`、`pytest` 等），**不要**直接执行全量 `pip install -e .` 强行覆盖升级该环境中已有的 `fastmcp` / `mcp` 等包；若需补充缺失包，应按需单独安装并确认不破坏现有版本。
+
+## 5. 常用工作流参考
 
 ### 日常开发与提交（在 `local-dev` 分支）
 ```bash
