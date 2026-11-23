@@ -130,3 +130,37 @@ SwarmRuntime.start_run()
 | **工具安全与性能** | 只读并发/写串行批处理、去重与失败熔断、只读硬超时/写工具守护、10K 截断与脱敏、`fsync` Trace | 解读工具返回的数据或错误、调整后续研究策略 |
 | **上下文与成本控制** | 真实 Token 窗口解析与锚定、L1/L2 确定性压缩、L4 过早压缩拒绝、20K 尾部保护、Worker 磁盘卸载、工具懒加载 | 生成 L3/L5 结构化语义摘要、按需调用 `compact` 工具 |
 | **容错、取消与验收** | `_ACTIVE_RUNS` 级联取消、心跳与僵尸回收、原子 Checkpoint（禁重放写操作）、三阶段增量续跑、离线 `evals/harness` 断言 | 断点恢复后判断下一步检查动作、产出最终人类可读交付物 |
+
+---
+
+## 5. 数据流边界：本地计算粒度、LLM 输入口径与工具目录约定
+
+系统遵循 **“控制流走 LLM，数据流走磁盘指针；明细计算留本地，统计摘要进窗口”** 的核心架构原则（核心实现在 `agent/src/agent/result_artifacts.py:57-89` 与 `agent/src/config/limits.py:13`）。
+
+### 5.1 本地计算（含粒度） vs 提交给 LLM 的内容对照表
+
+| 业务环节 | 对应工具模块 (`agent/src/tools/`) | 本地确定性计算内容与粒度 | 原始明细落盘去向 | 真正提交给 LLM 的内容（实际粒度） | LLM 负责的解读与汇总 |
+|---|---|---|---|---|---|
+| **行情拉取** | `market_data_tool.py` | Loader + Data Gateway 拉取清洗复权，粒度为 **`1m / 5m / 15m / 30m / 1H / 4H / 1D / 1W / 1M` 逐 Bar OHLCV**（Phase 2 扩展后本地聚合 L2/Tick） | `tool-results/{sha256}/result.json` + 规范化 CSV | - `<= 10,000` 字符：直接给逐 Bar OHLCV 行<br>- `> 10,000` 字符：仅给 `_summary`（条数/起止日/极值/来源口径）+ `_result_file` 指针 + 首尾 1K 预览<br>- Swarm Grounding：仅最近 **5 根日线 Bar** + 30 日极值 | 判断覆盖完整性与走势形态，决定下一步调用的指标/因子/回测工具 |
+| **技术指标** | `technical_indicator_tool.py` | Pandas/NumPy 全区间 **逐 Bar** 计算均线/RSI/MACD/布林带等序列 | `tool-results/` 落盘 | 最近窗口指标数值与信号状态摘要（受 10K 上限控制） | 结合价量形态做技术面定性研判 |
+| **因子加工与评测** | `alpha_bench_tool.py`、`factor_analysis_tool.py` | 宽表 `DatetimeIndex × symbols` **全截面矩阵**向量化计算：478 因子得分、逐日 Rank IC、5 分组逐日净值、随机置换对照与 OOS 切分 | `ic_series.csv`、`group_equity.csv`、全量因子矩阵留磁盘 | **聚合统计表**：`ic_mean`, `ic_std`, `ir`, `ic_positive_ratio`, `ic_count`, `long_short_spread`, `group_final_equity`、`alive/reversed/dead` 或 `confirmed_alive` 分类 | 筛选有效因子、诊断失效/反转原因、提出因子合成或中性化改进建议 |
+| **策略回测** | `backtest_tool.py`、`backtest_runs_tool.py` | `BaseEngine` **逐 Bar 撮合**：开盘估值、`shift(1)`、优化器/约束、50 次二分缩放、滑点/手续费/涨跌停/T+1/保证金逐笔记账 | `trades` 逐笔成交、`fills`、逐日 `equity_curve`、`actual_positions` 落盘 `run_dir` | **汇总指标卡（Run Card）**：总收益、年化、夏普、最大回撤、胜率、换手、超额、按标的/出场原因聚合统计与告警 | 归因分析、识别过拟合、决定参数调整或 OOS 验证方向 |
+| **金融数学与风控** | `quantlib_tool.py`、`portfolio_risk_tool.py`、`options_*.py` | 对**完整历史序列**计算波动率、相关性、VaR/CVaR、单标的风险贡献、期权 Greeks/IV 曲面与盈亏网格 | 场景网格 CSV / 完整快照 JSON 落盘 | 风险透视摘要表、集中度、回撤区间与策略对比结论 | 比较备选方案优劣、给出风控与仓位调整建议 |
+| **Swarm 跨角色汇总** | `swarm_tool.py` + `evidence_handoff.py` | 本地按 SHA-256 将上游工具原始 JSON 复制到下游隔离目录 `upstream/{sha256}.json` 并建索引 `upstream/index.json` | 原始工具大文件在磁盘点对点交接 | 上游角色的**文字摘要（`summary`）** + 紧凑的 `upstream/index.json` 索引（上游失败则强行注入缺失声明） | 下游（风控官/PM）综合多空观点、引用精确数字撰写最终报告（如需再算通过 `__data_ref__` 调 `quantlib_call`） |
+
+### 5.2 “绕过 LLM”的数据引用流转（`__data_ref__`）
+1. 工具 A 拉取长区间行情或完成计算后，全量明细不可变落盘至 `tool-results/{sha256}/result.json`，仅向 LLM 返回 `_summary` + `_result_file` 回执；
+2. LLM 发起二次计算（如 `quantlib_call`）时，只需在参数中传入 `__data_ref__`（指向该文件路径与列名），**无需由 LLM 复述或抄写明细数字**；
+3. 下游计算工具直接从磁盘读取全精度序列完成计算，再将新聚合结果返回给 LLM。
+4. **对高频 L2 接入的直接指导**：L2 逐笔/五档快照 → Bar 聚合 → 因子计算 → 回测撮合必须 100% 在本地 DuckDB/NumPy/Pandas 完成，严禁将 L2 明细直接灌入 LLM 上下文。
+
+### 5.3 最小口径速查
+- **提交给 LLM 的最小数据粒度**：行情类最小到**单根 K 线 Bar**（且超过 `10,000` 字符自动降级为摘要 + 文件指针）；因子/回测类默认为**聚合统计指标**。
+- **Factor 引擎的最小统计口径**：
+  - 时间频率：内置 478 因子均为日频（`1d`）；回测引擎原生最小支持 **`1m`**；`panel` 宽表本身不限频率。
+  - 输入字段：最少 1 个量价列（如 `close`）；支持 `fund:*`、`val:*`、`sector` 及 `extras_required`。
+  - 样本底线：行业标准化 `zscore_by_group` 同组 `>= 2`；横截面 IC 计算单日有效标的 **`>= 5`**（`_MIN_VALID_PER_DATE = 5`，纯单标的期货不可直接跑横截面 IC）；分层回测单日 `>= n_groups`；严格随机对照模式 `min_ic_count = 30`；全表 NaN 比例 `> 95%` 直接报错拦截。
+
+### 5.4 仓库两个 `tools` 目录的严格区分
+- **`agent/src/tools/`（✅ Agent 运行时工具模块）**：继承 `BaseTool`，注册到 `ToolRegistry` 供 LLM / Swarm Worker / MCP 调用的薄封装层（底层委托给 `agent/src/factors/`、`agent/backtest/`、`agent/src/quantlib/`）。
+- **根目录 `tools/`（❌ 非 LLM 工具）**：仓库自身开发运维脚本，包含 CI 门禁（`ci_*_gate.py`）、数据网关压测探针（`gateway_*_probe.py`、`gateway_soak.py`）和 Wiki 生成工具。
