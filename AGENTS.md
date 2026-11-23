@@ -22,8 +22,9 @@
 
 1. **修改代码或提交前必须先检查当前分支**（`git branch --show-current`）：
    - 如果当前位于 `main` 分支，**必须先切换到 `local-dev`**（`git checkout local-dev`），再进行任何文件修改或提交。
-2. **严禁修改 `upstream` 的推送限制**：不要移除或覆盖 `upstream` 的 `DISABLED` push URL，也不要尝试向 `HKUDS/Vibe-Trading` 推送任何分支或提交。
-3. **禁止未经确认向原仓库发起 PR**：所有提交仅保留在个人 Fork（`origin`）中。
+2. **严禁未经明确要求执行 `git push`**：完成本地修改或 `git commit` 后，**必须等待用户明确要求 push** 才能执行 `git push` 到远程仓库（且仅允许推送到 `origin`）。
+3. **严禁修改 `upstream` 的推送限制**：不要移除或覆盖 `upstream` 的 `DISABLED` push URL，也不要尝试向 `HKUDS/Vibe-Trading` 推送任何分支或提交。
+4. **禁止未经确认向原仓库发起 PR**：所有提交仅保留在个人 Fork（`origin`）中。
 
 ## 4. 常用工作流参考
 

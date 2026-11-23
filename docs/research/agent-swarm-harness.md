@@ -58,6 +58,29 @@ SwarmRuntime.start_run()
 - **`_CancellationSignal` / `_LayerStop`**：透传到 `llm.stream_chat(should_cancel=...)`、工具派发前后与重试退避等待中；非正常退出时自动取消子后台任务并 `llm.close()` 防止 socket 泄漏。
 - **硬超时与僵尸回收**：每层计算 `layer_deadline`，超时后 `layer_stop.expire()` 阻止挂起线程继续写事件；`HeartbeatTimer` 每 3 秒写心跳到 `events.jsonl`，`SwarmStore.reconcile_run()` 负责崩溃恢复与超时静默任务回收（`run_reaped`）。
 
+### 2.5 运行本质与 Worker 四级启动调用链
+
+#### 两层 Agent 心智模型（单 Agent vs Swarm）
+- **单 Agent 对话模式**（`agent/src/agent/loop.py`）：**不依赖 YAML**，直接运行动态 ReAct 循环（`LLM 思考 → 本地工具执行 → 结果回传 → 继续推理`）。
+- **Swarm 投研团队模式**（`runtime.py` + `worker.py`）：**YAML 只定义宏观 DAG 协作骨架（角色、工具白名单、依赖与 `input_from`），每个节点内部仍是完整的动态 ReAct 工具循环**，并非“调一次 LLM 拿文本就结束”。
+- **关键分工（非 LLM 心算）**：Swarm 并不是“把数据喂给 LLM 让 LLM 计算分析结果”，而是 **LLM 指挥本地确定性 Python 工具取数与计算（行情、因子、回测、`quantlib_call` 等）→ 工具返回精确数值与原始 JSON 证据（`upstream/index.json` / `__data_ref__`）→ LLM 负责定性解读、补查决策与跨层逐级汇总**。
+
+#### Worker 四级启动链与源码定位
+1. **最外层入口**：`SwarmRuntime.start_run()`（`agent/src/swarm/runtime.py:413-498`），由 Web API 或 Agent 工具（`agent/src/tools/swarm_tool.py`）调用，启动后台守护线程运行 `_execute_run()`。
+2. **层内并发派发**：`_execute_layer()`（`agent/src/swarm/runtime.py:1170-1200`）用 `ThreadPoolExecutor` 并发提交本层就绪任务，并带硬超时等待整层收齐：
+   ```python
+   future = executor.submit(
+       self._run_worker_with_retries,
+       agent_spec=agent_spec, task=task, upstream_summaries=upstream, ...
+   )
+   for future in as_completed(futures, timeout=layer_deadline):
+       results[futures[future]] = future.result()
+   ```
+3. **重试与断点续跑包装**：`_run_worker_with_retries()`（`agent/src/swarm/runtime.py:1330-1347`）检查 `checkpoint.json` 决定是否传 `resume=True`，随后调用 `run_worker(...)`。
+4. **Worker 实例化与 ReAct 主循环**：
+   - `run_worker()`（`agent/src/swarm/worker.py:482-547`）：为每个任务新建独立 `ChatLLM(model_name=agent_spec.model_name)`，调用 `_run_worker_impl()`，并在 `finally` 中强制 `llm.close()` 与取消遗留后台任务。
+   - `_run_worker_impl()`（`agent/src/swarm/worker.py:761-805`）：进入 `for iteration in range(max_iterations):` 主循环（每轮保存 checkpoint → 超时/取消检查 → `worker_context.compact()` 卸载上下文 → `llm.stream_chat()` → 执行白名单工具 → 结果追加到 `messages` 继续下一轮；最后一轮关闭 `tool_defs` 强制输出文本结论）。
+
 ---
 
 ## 3. 内部自研 Harness 管控机制详解
