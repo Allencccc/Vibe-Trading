@@ -2,7 +2,7 @@
 
 - **日期**: 2026-11-21
 - **分支**: `local-dev`（遵循 [AGENTS.md](../../../AGENTS.md) 本地 Fork 规范）
-- **状态**: 待审阅（Draft for Review）
+- **状态**: Phase 1 & Phase 2 已完成（`local-dev`），含后续 TODO
 - **路径分类**: Architectural（两阶段交付：Phase 1 深度研究与规范文档；Phase 2 本地 L2/Parquet 数据源工程接入）
 
 ---
@@ -215,3 +215,12 @@ config.yaml (parquet_dataset)
 1. **只读同步约束**：所有新增文档、脚本与代码严格在 `local-dev` 分支开发，禁止修改 `main` 分支或推送到 `upstream`。
 2. **不破坏上游兼容性**：对 `local_loader.py` 和 `alpha_bench_tool.py` 的改动保持向后兼容（现有单文件 YAML 配置和内置 Universe 行为零回归），降低未来 `git merge main` 时的冲突面。
 3. **性能与依赖**：优先复用项目已有的 `duckdb` 和 `pandas` 依赖完成 Parquet 扫描与聚合；若环境已安装 `polars` 可作为可选加速后端，但不强制新增重依赖。
+
+---
+
+## 5. 后续 TODO
+
+- [ ] **接入外部 Wind（Oracle）复权因子数据源（替代 Tushare）**：
+  - **背景与约束**：本地 A 股 L2 Parquet 原始快照为未复权价（`raw`），跨除权日的长期回测与横截面因子评测需要前复权因子；环境**不能通过 Tushare** 获取复权数据，需改为对接用户现有的外部 **Wind 数据库（Oracle）**。
+  - **接入方式**：支持在配置（如 `data-bridge/config.yaml` 或环境变量 / 独立凭据配置，严禁明文入库）中配置 Oracle 数据库连接参数（DSN/Host/Port/Service/User/Password 及目标复权因子表/SQL），按标的与日期区间查询 Wind 复权因子序列（如 `ASHAREEODPRICES.S_DQ_ADJFACTOR` 或对应视图）。
+  - **复用既有复权逻辑**：查询结果归一化为 `(trade_date, adj_factor)` 后，直接复用 [cn_adjust.py](../../../agent/backtest/loaders/cn_adjust.py) 的 `apply_qfq()` 对本地 A 股 Parquet 聚合出的 OHLCV Bar 执行等比前复权（价格乘比例、成交量除比例、成交额不变），并同步支持本地缓存以减少重复访问 Oracle。
