@@ -105,6 +105,19 @@ def _parse_period(period: str) -> tuple[str, str]:
     return start, end
 
 
+def _is_local_universe(universe: str) -> bool:
+    return isinstance(universe, str) and universe.startswith("local:") and len(universe) > len("local:")
+
+
+def _load_local_parquet_panel(
+    dataset_name: str, start: str, end: str
+) -> dict[str, Any]:
+    from backtest.loaders.local_l2_parquet_loader import LocalL2ParquetLoader
+
+    loader = LocalL2ParquetLoader()
+    return loader.build_panel(dataset_name, start_date=start, end_date=end, interval="1D")
+
+
 def _load_universe_panel(
     universe: str, period: str, *, use_cache: bool = True
 ) -> dict[str, pd.DataFrame]:
@@ -115,7 +128,7 @@ def _load_universe_panel(
     with one column per instrument.
 
     Args:
-        universe: ``csi300`` | ``sp500`` | ``btc-usdt``.
+        universe: ``csi300`` | ``sp500`` | ``btc-usdt`` | ``local:<dataset_name>``.
         period: ``YYYY-YYYY`` or ``YYYY-MM-DD/YYYY-MM-DD``.
         use_cache: When True (default) reuse a pickle in
             ``~/.vibe-trading/cache/`` if the same universe+period was fetched
@@ -125,21 +138,27 @@ def _load_universe_panel(
         ValueError: unknown universe or bad period.
         RuntimeError: ``TUSHARE_TOKEN`` unset when csi300 is requested.
     """
-    if universe not in _UNIVERSE_TAG:
+    is_local = _is_local_universe(universe)
+    if not is_local and universe not in _UNIVERSE_TAG:
         raise ValueError(
-            f"universe {universe!r} not recognized; expected one of {sorted(_UNIVERSE_TAG)}"
+            f"universe {universe!r} not recognized; expected one of {sorted(_UNIVERSE_TAG)} "
+            "or 'local:<dataset_name>'"
         )
     start, end = _parse_period(period)
 
     cache_dir = get_runtime_root() / "cache"
-    cache_path = cache_dir / f"{universe}_{start}_{end}.pkl"
+    safe_universe = universe.replace(":", "_").replace("/", "_")
+    cache_path = cache_dir / f"{safe_universe}_{start}_{end}.pkl"
     if use_cache and cache_path.is_file():
         cached = _read_pickle_cache(cache_path)
         if cached is not None:
             logger.info("universe %s: loaded from cache %s", universe, cache_path)
             return cached
 
-    if universe == "csi300":
+    if is_local:
+        dataset_name = universe.split(":", 1)[1]
+        panel = _load_local_parquet_panel(dataset_name, start, end)
+    elif universe == "csi300":
         panel = _load_csi300_panel(start, end)
     elif universe == "sp500":
         panel = _load_sp500_panel(start, end)
@@ -1488,7 +1507,10 @@ class AlphaBenchTool(BaseTool):
             },
             "universe": {
                 "type": "string",
-                "description": "csi300 | sp500 | btc-usdt (resolved via existing data tools).",
+                "description": (
+                    "csi300 | sp500 | btc-usdt | local:<dataset_name> "
+                    "(local Parquet/L2 datasets configured in data-bridge/config.yaml)."
+                ),
             },
             "period": {
                 "type": "string",

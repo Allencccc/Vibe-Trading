@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -173,9 +174,11 @@ def _source_file_revision(entry: dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 def _load_config() -> dict[str, Any] | None:
-    if not _CONFIG_PATH.exists():
+    env_path = os.environ.get("VIBE_TRADING_LOCAL_DATA_CONFIG", "").strip()
+    cfg_path = Path(env_path).expanduser() if env_path else _CONFIG_PATH
+    if not cfg_path.exists():
         return None
-    with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
@@ -279,24 +282,51 @@ class DataLoader:
     def __init__(self) -> None:
         self._config: dict[str, Any] | None = None
         self._source_by_symbol: dict[str, dict[str, Any]] = {}
+        self._datasets: dict[str, dict[str, Any]] = {}
 
     def is_available(self) -> bool:
-        """Return True when the YAML config file exists and has sources."""
+        """Return True when the YAML config file exists and has sources or datasets."""
         config = _load_config()
         if config is None:
             return False
         sources = config.get("sources")
-        return isinstance(sources, list) and len(sources) > 0
+        datasets = config.get("datasets")
+        has_sources = isinstance(sources, list) and len(sources) > 0
+        has_datasets = isinstance(datasets, list) and len(datasets) > 0
+        return has_sources or has_datasets
 
     def _ensure_config(self) -> None:
         if self._config is not None:
             return
         self._config = _load_config() or {}
         self._source_by_symbol = {}
-        for entry in self._config.get("sources", []):
-            symbol = entry.get("symbol", "").strip()
+        self._datasets = {}
+        for entry in self._config.get("sources", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            symbol = str(entry.get("symbol", "")).strip()
             if symbol:
                 self._source_by_symbol[symbol] = entry
+        for entry in self._config.get("datasets", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            if name:
+                self._datasets[name] = entry
+
+    def _resolve_parquet_dataset(self, clean: str) -> tuple[dict[str, Any] | None, str]:
+        if ":" in clean:
+            ds_name, sym = clean.split(":", 1)
+            if ds_name in self._datasets:
+                return self._datasets[ds_name], sym
+        for ds in self._datasets.values():
+            syms = ds.get("symbols") or []
+            overrides = ds.get("contract_overrides") or {}
+            if clean in syms or clean in overrides:
+                return ds, clean
+        if len(self._datasets) == 1:
+            return next(iter(self._datasets.values())), clean
+        return None, clean
 
     def fetch(
         self,
@@ -326,7 +356,33 @@ class DataLoader:
         for code in codes:
             clean = code.split(":", 1)[1] if code.startswith("local:") else code
             entry = self._source_by_symbol.get(clean)
+            if entry is not None and str(entry.get("type", "")).strip().lower() == "parquet_dataset":
+                try:
+                    from backtest.loaders.local_l2_parquet_loader import LocalL2ParquetLoader
+
+                    df = LocalL2ParquetLoader().fetch_symbol_from_dataset(
+                        entry, clean, start_date, end_date, interval=interval
+                    )
+                    if df is not None and not df.empty:
+                        result[clean] = df
+                except Exception as exc:
+                    logger.warning("local parquet_dataset failed for %s: %s", clean, exc)
+                continue
+
             if entry is None:
+                ds_cfg, ds_sym = self._resolve_parquet_dataset(clean)
+                if ds_cfg is not None:
+                    try:
+                        from backtest.loaders.local_l2_parquet_loader import LocalL2ParquetLoader
+
+                        df = LocalL2ParquetLoader().fetch_symbol_from_dataset(
+                            ds_cfg, ds_sym, start_date, end_date, interval=interval
+                        )
+                        if df is not None and not df.empty:
+                            result[clean] = df
+                    except Exception as exc:
+                        logger.warning("local parquet dataset failed for %s: %s", clean, exc)
+                    continue
                 logger.warning("local loader: no config entry for symbol %s", clean)
                 continue
             try:

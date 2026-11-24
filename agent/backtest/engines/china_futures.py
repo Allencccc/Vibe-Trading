@@ -172,6 +172,12 @@ class ChinaFuturesEngine(FuturesBaseEngine):
 
     def __init__(self, config: dict):
         self._pricing_defaults = {}
+        raw_overrides = config.get("contract_overrides")
+        self._contract_overrides: Dict[str, Dict[str, Any]] = (
+            {str(k).upper(): dict(v) for k, v in raw_overrides.items() if isinstance(v, dict)}
+            if isinstance(raw_overrides, dict)
+            else {}
+        )
         # Derive leverage from margin rate of first code, or use config override
         margin_override = config.get("margin_rate_override")
         if margin_override:
@@ -179,8 +185,7 @@ class ChinaFuturesEngine(FuturesBaseEngine):
         else:
             codes = config.get("codes", [])
             if codes:
-                product = _extract_product(codes[0])
-                mr = self._priced(_MARGIN_RATE, product, _DEFAULT_MARGIN_RATE, "margin_rate")
+                mr = self.get_margin_rate(codes[0])
                 leverage = 1.0 / mr
             else:
                 leverage = 10.0  # ~10% margin default
@@ -191,6 +196,16 @@ class ChinaFuturesEngine(FuturesBaseEngine):
         self.slippage_rate: float = config.get("slippage", 0.0005)
         self._margin_rate_override = margin_override if margin_override else None
         self._commission_override = config.get("commission_override")
+
+    def _lookup_override(self, symbol: str, field: str) -> Any:
+        """Look up per-contract override by exact symbol or extracted product code."""
+        if not self._contract_overrides:
+            return None
+        for key in (symbol.upper(), symbol.split(".")[0].upper(), _extract_product(symbol).upper()):
+            entry = self._contract_overrides.get(key)
+            if entry is not None and field in entry:
+                return entry[field]
+        return None
 
     def _priced(
         self,
@@ -257,8 +272,12 @@ class ChinaFuturesEngine(FuturesBaseEngine):
         # Both long and short allowed
 
         # Price limit, tested at execution time (see _blocked_by_limit).
-        product = _extract_product(symbol)
-        limit = self._priced(_PRICE_LIMIT, product, _DEFAULT_PRICE_LIMIT, "price_limit")
+        override_limit = self._lookup_override(symbol, "price_limit")
+        if override_limit is not None:
+            limit = float(override_limit)
+        else:
+            product = _extract_product(symbol)
+            limit = self._priced(_PRICE_LIMIT, product, _DEFAULT_PRICE_LIMIT, "price_limit")
         pos = self.positions.get(symbol) if direction == 0 else None
         if pos is None and direction == 0:
             return True
@@ -299,13 +318,15 @@ class ChinaFuturesEngine(FuturesBaseEngine):
         Returns:
             Commission in RMB.
         """
-        product = _extract_product(symbol)
-        mode, value = self._priced(
-            _COMMISSION, product, _DEFAULT_COMMISSION, "commission"
-        )
-        cm = self._priced(
-            _MULTIPLIER, product, _DEFAULT_MULTIPLIER, "contract_multiplier"
-        )
+        override_comm = self._lookup_override(symbol, "commission")
+        if override_comm is not None and isinstance(override_comm, (list, tuple)) and len(override_comm) == 2:
+            mode, value = str(override_comm[0]), float(override_comm[1])
+        else:
+            product = _extract_product(symbol)
+            mode, value = self._priced(
+                _COMMISSION, product, _DEFAULT_COMMISSION, "commission"
+            )
+        cm = self.get_contract_multiplier(symbol)
         if mode == "rate":
             return size * price * cm * value
         return size * value
@@ -315,14 +336,17 @@ class ChinaFuturesEngine(FuturesBaseEngine):
         return price * (1 + direction * self.slippage_rate)
 
     def get_contract_multiplier(self, symbol: str) -> float:
-        """Look up contract multiplier from product code."""
+        """Look up contract multiplier from product code or contract_overrides."""
+        override = self._lookup_override(symbol, "multiplier")
+        if override is not None:
+            return float(override)
         product = _extract_product(symbol)
         return float(
             self._priced(_MULTIPLIER, product, _DEFAULT_MULTIPLIER, "contract_multiplier")
         )
 
     def get_margin_rate(self, symbol: str) -> float:
-        """Look up exchange margin rate for a product.
+        """Look up exchange margin rate for a product or contract_overrides.
 
         Args:
             symbol: Futures symbol.
@@ -330,6 +354,9 @@ class ChinaFuturesEngine(FuturesBaseEngine):
         Returns:
             Margin rate (e.g. 0.10 for 10%).
         """
+        override = self._lookup_override(symbol, "margin_rate")
+        if override is not None:
+            return float(override)
         product = _extract_product(symbol)
         return self._priced(_MARGIN_RATE, product, _DEFAULT_MARGIN_RATE, "margin_rate")
 
